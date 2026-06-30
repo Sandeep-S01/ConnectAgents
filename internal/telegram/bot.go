@@ -74,9 +74,15 @@ func NewBot(token string, userID int64, gatewayAddr string, authToken string) *B
 	}
 }
 
+func (b *Bot) GatewayBaseURL() string {
+	return b.baseURL
+}
+
 func (b *Bot) Start(ctx context.Context) {
-	b.logger.Info("starting telegram bot long-polling loop")
-	b.sendMessage(b.userID, "🤖 <b>AI Gateway Bot started</b> and listening for commands.")
+	b.logger.Info("starting telegram bot long-polling loop", "user_id", b.userID, "gateway_base_url", b.baseURL)
+	if err := b.sendMessage(b.userID, "AI Gateway Bot started and listening for commands."); err != nil {
+		b.logger.Error("telegram startup message failed", "error", err)
+	}
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -145,7 +151,7 @@ func (b *Bot) getUpdates(ctx context.Context) ([]Update, error) {
 	return tr.Result, nil
 }
 
-func (b *Bot) sendMessage(chatID int64, text string) {
+func (b *Bot) sendMessage(chatID int64, text string) error {
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", b.token)
 	payload := map[string]any{
 		"chat_id":    chatID,
@@ -156,20 +162,23 @@ func (b *Bot) sendMessage(chatID int64, text string) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		b.logger.Error("failed to marshal message payload", "error", err)
-		return
+		return err
 	}
 
 	resp, err := b.httpClient.Post(u, "application/json", bytes.NewReader(data))
 	if err != nil {
 		b.logger.Error("failed to send message", "error", err)
-		return
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		err := fmt.Errorf("telegram API send failed: status %d: %s", resp.StatusCode, string(body))
 		b.logger.Error("telegram API send failed", "status", resp.StatusCode, "body", string(body))
+		return err
 	}
+	return nil
 }
 
 func (b *Bot) HandleEvent(event store.TaskEvent) {

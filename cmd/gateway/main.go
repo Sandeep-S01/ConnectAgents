@@ -87,6 +87,12 @@ func main() {
 	var bot *telegram.Bot
 	if cfg.TelegramBotToken != "" {
 		bot = telegram.NewBot(cfg.TelegramBotToken, cfg.TelegramUserID, cfg.Addr, cfg.AuthToken)
+		slog.Info("telegram_bot_enabled", "user_id", cfg.TelegramUserID, "gateway_base_url", bot.GatewayBaseURL())
+		if cfg.AuthToken == "" {
+			slog.Warn("telegram_bot_without_auth_token", "message", "PAIA_AUTH_TOKEN is empty; Telegram commands can reach an unauthenticated local gateway")
+		}
+	} else {
+		slog.Info("telegram_bot_disabled")
 	}
 
 	llmProv := llm.NewOpenRouterProvider(llm.OpenRouterConfig{

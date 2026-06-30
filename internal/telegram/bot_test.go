@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -62,6 +63,7 @@ func newTestBot(gatewayURL string, sent *sentMessages) *Bot {
 				return http.DefaultTransport.RoundTrip(r)
 			}),
 		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	return bot
 }
@@ -79,6 +81,31 @@ func ownerMessage(text string) Message {
 		From: &User{ID: 42},
 		Chat: Chat{ID: 42},
 		Text: text,
+	}
+}
+
+func TestNewBotExposesLoopbackGatewayBaseURLForWildcardBind(t *testing.T) {
+	bot := NewBot("test-token", 42, "0.0.0.0:8080", "auth-token")
+
+	if got, want := bot.GatewayBaseURL(), "http://127.0.0.1:8080"; got != want {
+		t.Fatalf("unexpected gateway base URL: got %q want %q", got, want)
+	}
+}
+
+func TestSendMessageReturnsTelegramAPIError(t *testing.T) {
+	bot := newTestBot("", &sentMessages{})
+	bot.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusUnauthorized, `{"ok":false,"description":"Unauthorized"}`), nil
+		}),
+	}
+
+	err := bot.sendMessage(42, "hello")
+	if err == nil {
+		t.Fatal("expected sendMessage to return Telegram API error")
+	}
+	if !strings.Contains(err.Error(), "telegram API send failed") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

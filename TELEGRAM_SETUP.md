@@ -33,6 +33,20 @@ When the bot starts, it sends a Telegram message to the configured user:
 AI Gateway Bot started and listening for commands.
 ```
 
+Startup logs also show:
+
+- Whether the Telegram bot is enabled or disabled.
+- The configured owner user ID.
+- The gateway base URL used by Telegram commands.
+
+The bot token is never written to logs.
+
+If `PAIA_TELEGRAM_BOT_TOKEN` is set, `PAIA_TELEGRAM_USER_ID` must also be set to a positive numeric ID. The gateway exits with a clear config error when the user ID is missing.
+
+If Telegram is enabled and `PAIA_AUTH_TOKEN` is empty, the gateway starts for local development but writes a warning because Telegram commands can reach an unauthenticated local gateway.
+
+If the startup Telegram message cannot be sent, check the gateway logs for `telegram startup message failed`. That usually means the bot token is wrong, the owner user ID is wrong, or the bot has not been opened from your Telegram account yet.
+
 ## 3. Run Telegram Doctor
 
 From Telegram:
