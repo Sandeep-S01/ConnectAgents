@@ -398,6 +398,16 @@ Response fields:
 - `statusCounts`: request counts grouped by `1xx`, `2xx`, `3xx`, `4xx`, and `5xx`.
 - `averageDurationMs`: average request duration in milliseconds.
 
+## Doctor
+
+Check local runtime readiness:
+
+```powershell
+Invoke-RestMethod -Headers $headers http://127.0.0.1:8080/api/doctor
+```
+
+The doctor endpoint checks SQLite, Git, Codex CLI, and registered project paths. Telegram `/doctor` uses this endpoint.
+
 ## Test
 
 ```powershell

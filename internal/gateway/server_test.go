@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -67,6 +68,87 @@ func TestServerHealthEndpointReportsStoreFailure(t *testing.T) {
 	}
 	if body["status"] != "unhealthy" {
 		t.Fatalf("expected unhealthy status, got %q", body["status"])
+	}
+}
+
+func TestServerDoctorReportsRuntimeReadiness(t *testing.T) {
+	t.Parallel()
+
+	runner := &sequencedCommandRunner{
+		results: []gateway.CommandResult{
+			{Status: "completed", ExitCode: 0, Stdout: "git version 2.50.0\n"},
+			{Status: "completed", ExitCode: 0, Stdout: "codex 1.0.0\n"},
+		},
+	}
+	server := newTestServerWithOptions(t, gateway.Options{
+		AuthToken:     "secret-token",
+		CommandRunner: runner,
+	})
+
+	projectPath := t.TempDir()
+	projectResponse := doAuthenticatedJSON(t, server, http.MethodPost, "/api/projects", map[string]string{
+		"name": "Missing Later",
+		"path": projectPath,
+	})
+	if projectResponse.Code != http.StatusCreated {
+		t.Fatalf("expected project status 201, got %d: %s", projectResponse.Code, projectResponse.Body.String())
+	}
+	if err := os.RemoveAll(projectPath); err != nil {
+		t.Fatalf("remove project path: %v", err)
+	}
+
+	unauthorized := httptest.NewRecorder()
+	unauthorizedRequest := httptest.NewRequest(http.MethodGet, "/api/doctor", nil)
+	server.ServeHTTP(unauthorized, unauthorizedRequest)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected doctor to require auth, got %d", unauthorized.Code)
+	}
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/doctor", nil)
+	request.Header.Set("Authorization", "Bearer secret-token")
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected doctor status 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+		Projects []struct {
+			Name   string `json:"name"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+		} `json:"projects"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode doctor response: %v", err)
+	}
+	if body.Status != "degraded" {
+		t.Fatalf("expected degraded status for missing project path, got %q", body.Status)
+	}
+	if len(body.Projects) != 1 || body.Projects[0].Status != "missing" {
+		t.Fatalf("expected missing project status, got %#v", body.Projects)
+	}
+	checks := map[string]string{}
+	for _, check := range body.Checks {
+		checks[check.Name] = check.Status
+	}
+	for name, want := range map[string]string{
+		"sqlite": "ok",
+		"git":    "ok",
+		"codex":  "ok",
+	} {
+		if checks[name] != want {
+			t.Fatalf("expected check %s=%s, got %q in %#v", name, want, checks[name], checks)
+		}
+	}
+	if got, want := strings.Join(runner.commands, ","), "git --version,codex --version"; got != want {
+		t.Fatalf("unexpected doctor commands: got %q want %q", got, want)
 	}
 }
 
@@ -2501,6 +2583,3 @@ func TestServerRunsLLMTask(t *testing.T) {
 		t.Fatalf("expected dummy response, got %v", runResult["stdout"])
 	}
 }
-
-
-

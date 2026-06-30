@@ -422,38 +422,51 @@ func (b *Bot) handleRemoveProject(chatID int64, args []string) {
 }
 
 func (b *Bot) handleDoctor(chatID int64) {
-	var health map[string]any
-	healthStatus := "unreachable"
-	if err := b.doGatewayRequest("GET", "/health", nil, &health); err != nil {
-		healthStatus = "failed: " + err.Error()
-	} else if status := formatAny(health["status"]); status != "" {
-		healthStatus = status
+	var doctor struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+		Projects []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Path    string `json:"path"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"projects"`
+	}
+	if err := b.doGatewayRequest("GET", "/api/doctor", nil, &doctor); err != nil {
+		b.sendMessage(chatID, "❌ Failed to run gateway doctor: "+err.Error())
+		return
 	}
 
-	var projects []map[string]any
-	projectsStatus := "unreachable"
-	if err := b.doGatewayRequest("GET", "/api/projects", nil, &projects); err != nil {
-		projectsStatus = "failed: " + err.Error()
-	} else {
-		projectsStatus = fmt.Sprintf("%d registered", len(projects))
-	}
-
-	authStatus := "not configured"
-	if b.authToken != "" {
-		authStatus = "configured"
-	}
-
-	b.sendMessage(chatID, fmt.Sprintf(`<b>Gateway Doctor</b>
-
-<b>Gateway health:</b> %s
-<b>Projects API:</b> %s
-<b>Auth token:</b> %s
-<b>Gateway URL:</b> <code>%s</code>`,
-		escapeTelegram(healthStatus),
-		escapeTelegram(projectsStatus),
-		escapeTelegram(authStatus),
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Gateway Doctor</b>\n\n<b>Status:</b> <code>%s</code>\n<b>Gateway URL:</b> <code>%s</code>\n\n",
+		escapeTelegram(doctor.Status),
 		escapeTelegram(b.baseURL),
 	))
+	sb.WriteString("<b>Checks:</b>\n")
+	for _, check := range doctor.Checks {
+		sb.WriteString(fmt.Sprintf("- %s: %s", escapeTelegram(check.Name), escapeTelegram(check.Status)))
+		if check.Message != "" {
+			sb.WriteString(" - " + escapeTelegram(truncateText(check.Message, 180)))
+		}
+		sb.WriteString("\n")
+	}
+	if len(doctor.Projects) > 0 {
+		sb.WriteString("\n<b>Projects:</b>\n")
+		for _, project := range doctor.Projects {
+			sb.WriteString(fmt.Sprintf("- %s (<code>%s</code>): %s\n",
+				escapeTelegram(project.Name),
+				escapeTelegram(project.ID),
+				escapeTelegram(project.Status),
+			))
+		}
+	}
+
+	b.sendMessage(chatID, truncateText(sb.String(), 3900))
 }
 
 func (b *Bot) handleGit(chatID int64, args []string) {

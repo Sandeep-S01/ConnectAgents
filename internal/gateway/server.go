@@ -67,6 +67,26 @@ type CommandResult struct {
 	Stderr   string `json:"stderr,omitempty"`
 }
 
+type DoctorResponse struct {
+	Status   string                `json:"status"`
+	Checks   []DoctorCheck         `json:"checks"`
+	Projects []DoctorProjectStatus `json:"projects"`
+}
+
+type DoctorCheck struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+type DoctorProjectStatus struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
 type Options struct {
 	AuthToken          string
 	MaxBodyBytes       int64
@@ -249,6 +269,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/approvals/{approvalID}/execute", s.handleExecuteApprovedCommand)
 	s.mux.HandleFunc("POST /api/command-policy/evaluate", s.handleEvaluateCommandPolicy)
 	s.mux.HandleFunc("GET /api/metrics", s.handleMetrics)
+	s.mux.HandleFunc("GET /api/doctor", s.handleDoctor)
 	s.mux.HandleFunc("POST /api/admin/backups", s.handleCreateBackup)
 }
 
@@ -727,7 +748,7 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 	var result CommandResult
 	if task.AgentType == "llm" {
 		s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.started", "Calling LLM provider...", ""))
-		
+
 		apiKey := r.Header.Get("X-OpenRouter-API-Key")
 		modelName := r.Header.Get("X-OpenRouter-Model")
 		runCtxWithKey := runCtx
@@ -737,7 +758,7 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 		if modelName != "" {
 			runCtxWithKey = context.WithValue(runCtxWithKey, "openrouter_model", modelName)
 		}
-		
+
 		respText, llmErr := s.llmProvider.GenerateResponse(runCtxWithKey, task.Prompt)
 		if llmErr != nil {
 			result = CommandResult{
@@ -1097,6 +1118,69 @@ func (s *Server) handleEvaluateCommandPolicy(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.metrics.SnapshotWithPending(http.StatusOK))
+}
+
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	response := DoctorResponse{
+		Status: "ok",
+	}
+
+	addCheck := func(check DoctorCheck) {
+		if check.Status != "ok" {
+			response.Status = "degraded"
+		}
+		response.Checks = append(response.Checks, check)
+	}
+
+	if err := s.store.Ping(r.Context()); err != nil {
+		addCheck(DoctorCheck{Name: "sqlite", Status: "failed", Message: err.Error()})
+	} else {
+		addCheck(DoctorCheck{Name: "sqlite", Status: "ok"})
+	}
+
+	projects, err := s.store.ListProjects(r.Context())
+	if err != nil {
+		addCheck(DoctorCheck{Name: "projects", Status: "failed", Message: err.Error()})
+	} else {
+		addCheck(DoctorCheck{Name: "projects", Status: "ok", Message: fmt.Sprintf("%d registered", len(projects))})
+		for _, project := range projects {
+			projectStatus := DoctorProjectStatus{
+				ID:     project.ID,
+				Name:   project.Name,
+				Path:   project.Path,
+				Status: "ok",
+			}
+			if _, statErr := os.Stat(project.Path); statErr != nil {
+				projectStatus.Status = "missing"
+				projectStatus.Message = statErr.Error()
+				response.Status = "degraded"
+			}
+			response.Projects = append(response.Projects, projectStatus)
+		}
+	}
+
+	addCheck(s.commandDoctorCheck(r.Context(), "git", "git --version"))
+	addCheck(s.commandDoctorCheck(r.Context(), "codex", "codex --version"))
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) commandDoctorCheck(ctx context.Context, name string, command string) DoctorCheck {
+	result, err := s.commandRunner.Run(ctx, "", command)
+	if err != nil {
+		return DoctorCheck{Name: name, Status: "failed", Message: err.Error()}
+	}
+	if result.Status == "failed" || result.ExitCode != 0 {
+		message := strings.TrimSpace(result.Stderr)
+		if message == "" {
+			message = strings.TrimSpace(result.Stdout)
+		}
+		if message == "" {
+			message = fmt.Sprintf("%s check failed", name)
+		}
+		return DoctorCheck{Name: name, Status: "failed", Message: message}
+	}
+	return DoctorCheck{Name: name, Status: "ok", Message: strings.TrimSpace(result.Stdout)}
 }
 
 func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {

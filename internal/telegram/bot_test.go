@@ -267,19 +267,16 @@ func TestRemoveProjectDeletesProjectFromGateway(t *testing.T) {
 	}
 }
 
-func TestDoctorChecksHealthProjectsAndAuthConfiguration(t *testing.T) {
+func TestDoctorUsesGatewayDoctorEndpoint(t *testing.T) {
 	var paths []string
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/health":
-			io.WriteString(w, `{"status":"ok"}`)
-		case "/api/projects":
-			io.WriteString(w, `[{"id":"proj_1","name":"Connect Agents","path":"D:\\Personal_Project\\ConnectAgents"}]`)
-		default:
+		if r.URL.Path != "/api/doctor" {
 			http.NotFound(w, r)
+			return
 		}
+		io.WriteString(w, `{"status":"degraded","checks":[{"name":"sqlite","status":"ok"},{"name":"git","status":"ok","message":"git version 2.50.0"},{"name":"codex","status":"failed","message":"codex not found"}],"projects":[{"id":"proj_1","name":"Connect Agents","path":"D:\\Personal_Project\\ConnectAgents","status":"ok"}]}`)
 	}))
 	defer gateway.Close()
 
@@ -288,11 +285,11 @@ func TestDoctorChecksHealthProjectsAndAuthConfiguration(t *testing.T) {
 
 	bot.handleMessage(context.Background(), ownerMessage("/doctor"))
 
-	if got, want := strings.Join(paths, ","), "GET /health,GET /api/projects"; got != want {
+	if got, want := strings.Join(paths, ","), "GET /api/doctor"; got != want {
 		t.Fatalf("unexpected gateway calls: got %q want %q", got, want)
 	}
 	message := sent.joined()
-	for _, text := range []string{"Gateway health", "ok", "Projects API", "1 registered", "Auth token"} {
+	for _, text := range []string{"Gateway Doctor", "degraded", "sqlite: ok", "codex: failed", "Connect Agents"} {
 		if !strings.Contains(message, text) {
 			t.Fatalf("doctor response missing %q:\n%s", text, message)
 		}

@@ -43,9 +43,10 @@ From Telegram:
 
 Expected checks:
 
-- Gateway health is `ok`.
-- Projects API is reachable.
-- Auth token is configured.
+- SQLite is reachable.
+- Git is available on the PC.
+- Codex CLI is available on the PC.
+- Registered project paths still exist.
 - Gateway URL points to the local gateway address.
 
 ## 4. Register A Project From Telegram
