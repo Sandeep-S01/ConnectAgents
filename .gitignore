@@ -1,0 +1,5 @@
+data/
+logs/
+*.exe
+*.test
+*.out
