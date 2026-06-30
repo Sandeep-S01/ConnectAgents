@@ -245,6 +245,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg Message) {
 		b.handleProjects(msg.Chat.ID)
 	case "/addproject":
 		b.handleAddProject(msg.Chat.ID, text)
+	case "/updateproject":
+		b.handleUpdateProject(msg.Chat.ID, text)
+	case "/removeproject":
+		b.handleRemoveProject(msg.Chat.ID, args)
 	case "/doctor":
 		b.handleDoctor(msg.Chat.ID)
 	case "/git":
@@ -282,6 +286,8 @@ func (b *Bot) handleHelp(chatID int64) {
 <b>Commands:</b>
 /projects - List registered workspace projects
 /addproject &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Register a local project
+/updateproject &lt;project_id&gt; | &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Update a project
+/removeproject &lt;project_id&gt; - Remove a registered project
 /doctor - Check gateway health, project access, and bot configuration
 /git &lt;project_id&gt; - Get short Git status and diff stats
 /commit &lt;project_id&gt; &lt;message&gt; - Stage all changes and commit
@@ -357,6 +363,62 @@ func (b *Bot) handleAddProject(chatID int64, text string) {
 		escapeTelegram(formatAny(project["id"])),
 		escapeTelegram(formatAny(project["path"])),
 	))
+}
+
+func (b *Bot) handleUpdateProject(chatID int64, text string) {
+	body := strings.TrimSpace(strings.TrimPrefix(text, "/updateproject"))
+	parts := strings.Split(body, "|")
+	if len(parts) < 3 {
+		b.sendMessage(chatID, "⚠️ Usage: <code>/updateproject &lt;project_id&gt; | &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack]</code>")
+		return
+	}
+
+	projectID := strings.TrimSpace(parts[0])
+	name := strings.TrimSpace(parts[1])
+	path := strings.TrimSpace(parts[2])
+	techStack := ""
+	if len(parts) > 3 {
+		techStack = strings.TrimSpace(parts[3])
+	}
+	if projectID == "" || name == "" || path == "" {
+		b.sendMessage(chatID, "⚠️ Project ID, name, and absolute path are required.")
+		return
+	}
+
+	payload := map[string]string{
+		"name":      name,
+		"path":      path,
+		"techStack": techStack,
+	}
+
+	var project map[string]any
+	updatePath := "/api/projects/" + url.PathEscape(projectID)
+	if err := b.doGatewayRequest("PUT", updatePath, payload, &project); err != nil {
+		b.sendMessage(chatID, "❌ Failed to update project: "+err.Error())
+		return
+	}
+
+	b.sendMessage(chatID, fmt.Sprintf("✅ <b>Project updated</b>\n\n<b>Name:</b> %s\n<b>ID:</b> <code>%s</code>\n<b>Path:</b> <code>%s</code>",
+		escapeTelegram(formatAny(project["name"])),
+		escapeTelegram(formatAny(project["id"])),
+		escapeTelegram(formatAny(project["path"])),
+	))
+}
+
+func (b *Bot) handleRemoveProject(chatID int64, args []string) {
+	if len(args) == 0 {
+		b.sendMessage(chatID, "⚠️ Usage: <code>/removeproject &lt;project_id&gt;</code>")
+		return
+	}
+	projectID := args[0]
+
+	removePath := "/api/projects/" + url.PathEscape(projectID)
+	if err := b.doGatewayRequest("DELETE", removePath, nil, nil); err != nil {
+		b.sendMessage(chatID, "❌ Failed to remove project: "+err.Error())
+		return
+	}
+
+	b.sendMessage(chatID, fmt.Sprintf("✅ Project removed: <code>%s</code>", escapeTelegram(projectID)))
 }
 
 func (b *Bot) handleDoctor(chatID int64) {

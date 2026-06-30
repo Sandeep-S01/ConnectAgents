@@ -89,7 +89,7 @@ func TestHelpIncludesStatusLogsAndCancelCommands(t *testing.T) {
 	bot.handleMessage(context.Background(), ownerMessage("/help"))
 
 	message := sent.joined()
-	for _, command := range []string{"/status", "/task", "/logs", "/cancel", "/runtest", "/addproject", "/doctor"} {
+	for _, command := range []string{"/status", "/task", "/logs", "/cancel", "/runtest", "/addproject", "/updateproject", "/removeproject", "/doctor"} {
 		if !strings.Contains(message, command) {
 			t.Fatalf("help message does not include %s:\n%s", command, message)
 		}
@@ -206,6 +206,63 @@ func TestAddProjectPostsProjectToGateway(t *testing.T) {
 	for _, text := range []string{"Project registered", "proj_1", "Connect Agents"} {
 		if !strings.Contains(message, text) {
 			t.Fatalf("addproject response missing %q:\n%s", text, message)
+		}
+	}
+}
+
+func TestUpdateProjectPutsProjectToGateway(t *testing.T) {
+	var payload map[string]string
+	var methodPath string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodPath = r.Method + " " + r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode project payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"proj_1","name":"Connect Agents","path":"D:\\Personal_Project\\ConnectAgents","techStack":"Go"}`)
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage(`/updateproject proj_1 | Connect Agents | D:\Personal_Project\ConnectAgents | Go`))
+
+	if methodPath != "PUT /api/projects/proj_1" {
+		t.Fatalf("unexpected gateway call: %s", methodPath)
+	}
+	if payload["name"] != "Connect Agents" || payload["path"] != `D:\Personal_Project\ConnectAgents` || payload["techStack"] != "Go" {
+		t.Fatalf("unexpected project payload: %#v", payload)
+	}
+	message := sent.joined()
+	for _, text := range []string{"Project updated", "proj_1", "Connect Agents"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("updateproject response missing %q:\n%s", text, message)
+		}
+	}
+}
+
+func TestRemoveProjectDeletesProjectFromGateway(t *testing.T) {
+	var methodPath string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodPath = r.Method + " " + r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage("/removeproject proj_1"))
+
+	if methodPath != "DELETE /api/projects/proj_1" {
+		t.Fatalf("unexpected gateway call: %s", methodPath)
+	}
+	message := sent.joined()
+	for _, text := range []string{"Project removed", "proj_1"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("removeproject response missing %q:\n%s", text, message)
 		}
 	}
 }

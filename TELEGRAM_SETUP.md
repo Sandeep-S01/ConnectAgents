@@ -64,6 +64,18 @@ Then list projects:
 
 Copy the project ID returned by `/projects`.
 
+To update a registered project:
+
+```text
+/updateproject <project_id> | ConnectAgents | D:\Personal_Project\ConnectAgents | Go
+```
+
+To remove a registered project:
+
+```text
+/removeproject <project_id>
+```
+
 ## 5. Smoke Test A Codex Task
 
 Start with a harmless prompt:
@@ -107,6 +119,8 @@ Use:
 /doctor
 /projects
 /addproject <name> | <absolute_path> [| tech_stack]
+/updateproject <project_id> | <name> | <absolute_path> [| tech_stack]
+/removeproject <project_id>
 /run <project_id> <prompt>
 /tasks
 /status <task_id>
