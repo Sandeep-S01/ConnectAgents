@@ -76,6 +76,7 @@ Then check status and logs:
 
 ```text
 /status <task_id>
+/task <task_id>
 /logs <task_id>
 ```
 
@@ -109,8 +110,10 @@ Use:
 /run <project_id> <prompt>
 /tasks
 /status <task_id>
+/task <task_id>
 /logs <task_id>
 /cancel <task_id>
+/runtest <project_id>
 /git <project_id>
 /approve <approval_id>
 /reject <approval_id>

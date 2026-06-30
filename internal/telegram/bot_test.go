@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"personal-ai-assistant/internal/store"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -87,9 +89,91 @@ func TestHelpIncludesStatusLogsAndCancelCommands(t *testing.T) {
 	bot.handleMessage(context.Background(), ownerMessage("/help"))
 
 	message := sent.joined()
-	for _, command := range []string{"/status", "/logs", "/cancel", "/addproject", "/doctor"} {
+	for _, command := range []string{"/status", "/task", "/logs", "/cancel", "/runtest", "/addproject", "/doctor"} {
 		if !strings.Contains(message, command) {
 			t.Fatalf("help message does not include %s:\n%s", command, message)
+		}
+	}
+}
+
+func TestTaskAliasFetchesTaskStatus(t *testing.T) {
+	var paths []string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/tasks/task_1":
+			io.WriteString(w, `{"id":"task_1","projectId":"proj_1","agentType":"codex","prompt":"Run tests","status":"completed"}`)
+		case "/api/tasks/task_1/events":
+			io.WriteString(w, `[{"id":1,"taskId":"task_1","eventType":"agent.completed","message":"Codex task completed","createdAt":"2026-06-30T10:00:01+05:30"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage("/task task_1"))
+
+	if got, want := strings.Join(paths, ","), "GET /api/tasks/task_1,GET /api/tasks/task_1/events"; got != want {
+		t.Fatalf("unexpected gateway calls: got %q want %q", got, want)
+	}
+	if message := sent.joined(); !strings.Contains(message, "Task Status") || !strings.Contains(message, "completed") {
+		t.Fatalf("task alias response missing status details:\n%s", message)
+	}
+}
+
+func TestRunTestPostsToProjectTestEndpoint(t *testing.T) {
+	var methodPath string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodPath = r.Method + " " + r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"status":"completed","command":"go test ./...","exitCode":0,"stdout":"ok personal-ai-assistant/internal/telegram","stderr":""}`)
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage("/runtest proj_1"))
+
+	if methodPath != "POST /api/projects/proj_1/tests/run" {
+		t.Fatalf("unexpected gateway call: %s", methodPath)
+	}
+	message := sent.joined()
+	for _, text := range []string{"Test Run Complete", "go test ./...", "completed", "ok personal-ai-assistant"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("runtest response missing %q:\n%s", text, message)
+		}
+	}
+}
+
+func TestCompletedEventIncludesTaskOutputSummary(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/tasks/task_1" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"task_1","projectId":"proj_1","agentType":"codex","prompt":"Run tests","status":"completed","stdout":"tests passed successfully","stderr":""}`)
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.HandleEvent(store.TaskEvent{
+		TaskID:    "task_1",
+		EventType: "agent.completed",
+		Message:   "Codex task completed",
+	})
+
+	message := sent.joined()
+	for _, text := range []string{"agent.completed", "task_1", "tests passed successfully"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("completion notification missing %q:\n%s", text, message)
 		}
 	}
 }

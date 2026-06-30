@@ -216,6 +216,9 @@ func (b *Bot) HandleEvent(event store.TaskEvent) {
 
 	msg := fmt.Sprintf("%s <b>Event: %s</b>\n<b>Task ID:</b> <code>%s</code>\n<b>Message:</b> %s",
 		emoji, event.EventType, event.TaskID, event.Message)
+	if summary := b.taskOutputSummary(event.TaskID); summary != "" {
+		msg += "\n\n" + summary
+	}
 	b.sendMessage(b.userID, msg)
 }
 
@@ -254,8 +257,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg Message) {
 		b.handleTasks(msg.Chat.ID)
 	case "/run":
 		b.handleRun(msg.Chat.ID, args)
-	case "/status":
+	case "/status", "/task":
 		b.handleStatus(msg.Chat.ID, args)
+	case "/runtest":
+		b.handleRunTest(msg.Chat.ID, args)
 	case "/logs":
 		b.handleLogs(msg.Chat.ID, args)
 	case "/cancel":
@@ -284,6 +289,8 @@ func (b *Bot) handleHelp(chatID int64) {
 /tasks - List the last 5 tasks and their status
 /run &lt;project_id&gt; &lt;prompt&gt; - Create and run a Codex agent task
 /status &lt;task_id&gt; - Show task status and latest event
+/task &lt;task_id&gt; - Alias for /status
+/runtest &lt;project_id&gt; - Run the configured project test command
 /logs &lt;task_id&gt; - Show recent task events
 /cancel &lt;task_id&gt; - Cancel a running Codex task
 /approve &lt;approval_id&gt; - Approve a pending request
@@ -542,6 +549,41 @@ func (b *Bot) handleStatus(chatID int64, args []string) {
 	b.sendMessage(chatID, truncateText(msg, 3900))
 }
 
+func (b *Bot) handleRunTest(chatID int64, args []string) {
+	if len(args) == 0 {
+		b.sendMessage(chatID, "⚠️ Usage: <code>/runtest &lt;project_id&gt;</code>")
+		return
+	}
+	projectID := args[0]
+
+	var result map[string]any
+	testPath := "/api/projects/" + url.PathEscape(projectID) + "/tests/run"
+	if err := b.doGatewayRequest("POST", testPath, nil, &result); err != nil {
+		b.sendMessage(chatID, "❌ Failed to run project tests: "+err.Error())
+		return
+	}
+
+	msg := fmt.Sprintf(`<b>Test Run Complete</b>
+
+<b>Project:</b> <code>%s</code>
+<b>Status:</b> <code>%s</code>
+<b>Command:</b> <code>%s</code>
+<b>Exit Code:</b> <code>%s</code>`,
+		escapeTelegram(projectID),
+		escapeTelegram(formatAny(result["status"])),
+		escapeTelegram(formatAny(result["command"])),
+		escapeTelegram(formatAny(result["exitCode"])),
+	)
+	if stdout := strings.TrimSpace(formatAny(result["stdout"])); stdout != "" {
+		msg += "\n<b>Stdout:</b>\n<pre>" + escapeTelegram(truncateText(stdout, 700)) + "</pre>"
+	}
+	if stderr := strings.TrimSpace(formatAny(result["stderr"])); stderr != "" {
+		msg += "\n<b>Stderr:</b>\n<pre>" + escapeTelegram(truncateText(stderr, 700)) + "</pre>"
+	}
+
+	b.sendMessage(chatID, truncateText(msg, 3900))
+}
+
 func (b *Bot) handleLogs(chatID int64, args []string) {
 	if len(args) == 0 {
 		b.sendMessage(chatID, "âš ï¸ Usage: <code>/logs &lt;task_id&gt;</code>")
@@ -667,6 +709,26 @@ func formatAny(value any) string {
 		return ""
 	}
 	return fmt.Sprint(value)
+}
+
+func (b *Bot) taskOutputSummary(taskID string) string {
+	var task store.Task
+	taskPath := "/api/tasks/" + url.PathEscape(taskID)
+	if err := b.doGatewayRequest("GET", taskPath, nil, &task); err != nil {
+		return ""
+	}
+
+	var sections []string
+	if stdout := strings.TrimSpace(task.Stdout); stdout != "" {
+		sections = append(sections, "<b>Stdout:</b>\n<pre>"+escapeTelegram(truncateText(stdout, 700))+"</pre>")
+	}
+	if stderr := strings.TrimSpace(task.Stderr); stderr != "" {
+		sections = append(sections, "<b>Stderr:</b>\n<pre>"+escapeTelegram(truncateText(stderr, 700))+"</pre>")
+	}
+	if task.ErrorMessage != "" {
+		sections = append(sections, "<b>Error:</b> "+escapeTelegram(truncateText(task.ErrorMessage, 700)))
+	}
+	return strings.Join(sections, "\n")
 }
 
 func (b *Bot) doGatewayRequest(method, path string, reqBody any, respOut any) error {
