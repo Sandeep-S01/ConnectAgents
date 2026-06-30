@@ -90,6 +90,10 @@ Start-Process http://127.0.0.1:8080/
 
 The dashboard is served by the Go gateway and provides project registration, task creation, Codex run/cancel controls, pending approval actions, and live SSE task events. When `PAIA_AUTH_TOKEN` is set, enter the same token in the dashboard sign-in field. The token is exchanged for an HttpOnly same-origin session cookie and is not stored in browser local storage.
 
+## Telegram Setup
+
+Telegram is the first phone control surface. See `TELEGRAM_SETUP.md` for BotFather setup, gateway environment variables, `/doctor`, `/addproject`, and the phone-to-PC smoke test flow.
+
 ## API
 
 Health:

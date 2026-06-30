@@ -240,6 +240,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg Message) {
 		b.handleHelp(msg.Chat.ID)
 	case "/projects":
 		b.handleProjects(msg.Chat.ID)
+	case "/addproject":
+		b.handleAddProject(msg.Chat.ID, text)
+	case "/doctor":
+		b.handleDoctor(msg.Chat.ID)
 	case "/git":
 		b.handleGit(msg.Chat.ID, args)
 	case "/commit":
@@ -272,6 +276,8 @@ func (b *Bot) handleHelp(chatID int64) {
 
 <b>Commands:</b>
 /projects - List registered workspace projects
+/addproject &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Register a local project
+/doctor - Check gateway health, project access, and bot configuration
 /git &lt;project_id&gt; - Get short Git status and diff stats
 /commit &lt;project_id&gt; &lt;message&gt; - Stage all changes and commit
 /push &lt;project_id&gt; - Push current branch to remote origin
@@ -306,6 +312,79 @@ func (b *Bot) handleProjects(chatID int64) {
 	}
 
 	b.sendMessage(chatID, sb.String())
+}
+
+func (b *Bot) handleAddProject(chatID int64, text string) {
+	body := strings.TrimSpace(strings.TrimPrefix(text, "/addproject"))
+	parts := strings.Split(body, "|")
+	if len(parts) < 2 {
+		b.sendMessage(chatID, "⚠️ Usage: <code>/addproject &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack]</code>")
+		return
+	}
+
+	name := strings.TrimSpace(parts[0])
+	path := strings.TrimSpace(parts[1])
+	techStack := ""
+	if len(parts) > 2 {
+		techStack = strings.TrimSpace(parts[2])
+	}
+	if name == "" || path == "" {
+		b.sendMessage(chatID, "⚠️ Project name and absolute path are required.")
+		return
+	}
+
+	payload := map[string]string{
+		"name":      name,
+		"path":      path,
+		"techStack": techStack,
+	}
+
+	var project map[string]any
+	if err := b.doGatewayRequest("POST", "/api/projects", payload, &project); err != nil {
+		b.sendMessage(chatID, "❌ Failed to register project: "+err.Error())
+		return
+	}
+
+	b.sendMessage(chatID, fmt.Sprintf("✅ <b>Project registered</b>\n\n<b>Name:</b> %s\n<b>ID:</b> <code>%s</code>\n<b>Path:</b> <code>%s</code>",
+		escapeTelegram(formatAny(project["name"])),
+		escapeTelegram(formatAny(project["id"])),
+		escapeTelegram(formatAny(project["path"])),
+	))
+}
+
+func (b *Bot) handleDoctor(chatID int64) {
+	var health map[string]any
+	healthStatus := "unreachable"
+	if err := b.doGatewayRequest("GET", "/health", nil, &health); err != nil {
+		healthStatus = "failed: " + err.Error()
+	} else if status := formatAny(health["status"]); status != "" {
+		healthStatus = status
+	}
+
+	var projects []map[string]any
+	projectsStatus := "unreachable"
+	if err := b.doGatewayRequest("GET", "/api/projects", nil, &projects); err != nil {
+		projectsStatus = "failed: " + err.Error()
+	} else {
+		projectsStatus = fmt.Sprintf("%d registered", len(projects))
+	}
+
+	authStatus := "not configured"
+	if b.authToken != "" {
+		authStatus = "configured"
+	}
+
+	b.sendMessage(chatID, fmt.Sprintf(`<b>Gateway Doctor</b>
+
+<b>Gateway health:</b> %s
+<b>Projects API:</b> %s
+<b>Auth token:</b> %s
+<b>Gateway URL:</b> <code>%s</code>`,
+		escapeTelegram(healthStatus),
+		escapeTelegram(projectsStatus),
+		escapeTelegram(authStatus),
+		escapeTelegram(b.baseURL),
+	))
 }
 
 func (b *Bot) handleGit(chatID int64, args []string) {
@@ -581,6 +660,13 @@ func truncateText(value string, limit int) string {
 
 func escapeTelegram(value string) string {
 	return html.EscapeString(value)
+}
+
+func formatAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
 }
 
 func (b *Bot) doGatewayRequest(method, path string, reqBody any, respOut any) error {

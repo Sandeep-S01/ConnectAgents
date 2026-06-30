@@ -87,9 +87,73 @@ func TestHelpIncludesStatusLogsAndCancelCommands(t *testing.T) {
 	bot.handleMessage(context.Background(), ownerMessage("/help"))
 
 	message := sent.joined()
-	for _, command := range []string{"/status", "/logs", "/cancel"} {
+	for _, command := range []string{"/status", "/logs", "/cancel", "/addproject", "/doctor"} {
 		if !strings.Contains(message, command) {
 			t.Fatalf("help message does not include %s:\n%s", command, message)
+		}
+	}
+}
+
+func TestAddProjectPostsProjectToGateway(t *testing.T) {
+	var payload map[string]string
+	var methodPath string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodPath = r.Method + " " + r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode project payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"proj_1","name":"Connect Agents","path":"D:\\Personal Project\\ConnectAgents","techStack":"Go"}`)
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage(`/addproject Connect Agents | D:\Personal Project\ConnectAgents | Go`))
+
+	if methodPath != "POST /api/projects" {
+		t.Fatalf("unexpected gateway call: %s", methodPath)
+	}
+	if payload["name"] != "Connect Agents" || payload["path"] != `D:\Personal Project\ConnectAgents` || payload["techStack"] != "Go" {
+		t.Fatalf("unexpected project payload: %#v", payload)
+	}
+	message := sent.joined()
+	for _, text := range []string{"Project registered", "proj_1", "Connect Agents"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("addproject response missing %q:\n%s", text, message)
+		}
+	}
+}
+
+func TestDoctorChecksHealthProjectsAndAuthConfiguration(t *testing.T) {
+	var paths []string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			io.WriteString(w, `{"status":"ok"}`)
+		case "/api/projects":
+			io.WriteString(w, `[{"id":"proj_1","name":"Connect Agents","path":"D:\\Personal_Project\\ConnectAgents"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage("/doctor"))
+
+	if got, want := strings.Join(paths, ","), "GET /health,GET /api/projects"; got != want {
+		t.Fatalf("unexpected gateway calls: got %q want %q", got, want)
+	}
+	message := sent.joined()
+	for _, text := range []string{"Gateway health", "ok", "Projects API", "1 registered", "Auth token"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("doctor response missing %q:\n%s", text, message)
 		}
 	}
 }
