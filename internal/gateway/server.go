@@ -744,6 +744,7 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 	if openaiKey != "" {
 		runCtx = context.WithValue(runCtx, "openai_api_key", openaiKey)
 	}
+	persistCtx := context.WithoutCancel(r.Context())
 
 	var result CommandResult
 	if task.AgentType == "llm" {
@@ -785,7 +786,7 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 			planningPrompt := "SYSTEM INSTRUCTION: You are in PLANNING MODE. Write a detailed, bulleted markdown plan outlining which files you will inspect, modify, or create, and the commands you will run to accomplish the task below. DO NOT run any modifying commands or make any file edits yet. Output the plan and stop.\n\nTASK:\n" + task.Prompt
 			result, err = s.agentRunner.RunCodex(runCtx, project.Path, planningPrompt)
 			if err == nil && result.ExitCode == 0 {
-				_, approvalErr := s.store.CreateApprovalRequest(r.Context(), store.CreateApprovalRequestInput{
+				_, approvalErr := s.store.CreateApprovalRequest(persistCtx, store.CreateApprovalRequestInput{
 					TaskID:      task.ID,
 					ActionType:  "task_plan",
 					Description: "Approve execution plan for task: " + task.Prompt,
@@ -796,9 +797,9 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 				if approvalErr != nil {
 					s.logErr(r.Context(), "create_plan_approval", approvalErr)
 				}
-				s.logErr(r.Context(), "update_task_status", s.store.UpdateTaskStatus(r.Context(), task.ID, "waiting_for_approval"))
-				s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.plan_generated", "Execution plan generated, waiting for approval", result.Stdout))
-				s.logErr(r.Context(), "publish_task_event", s.publishLatestTaskEvent(r.Context(), task.ID))
+				s.logErr(persistCtx, "update_task_status", s.store.UpdateTaskStatus(persistCtx, task.ID, "waiting_for_approval"))
+				s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.plan_generated", "Execution plan generated, waiting for approval", result.Stdout))
+				s.logErr(persistCtx, "publish_task_event", s.publishLatestTaskEvent(persistCtx, task.ID))
 				writeJSON(w, http.StatusOK, map[string]any{
 					"status": "waiting_for_approval",
 					"plan":   result.Stdout,
@@ -844,19 +845,19 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 			errMsg = fmt.Sprintf("exit code %d", result.ExitCode)
 		}
 	}
-	s.logErr(r.Context(), "save_task_output", s.store.SaveTaskOutput(r.Context(), task.ID, result.Stdout, result.Stderr, errMsg))
+	s.logErr(persistCtx, "save_task_output", s.store.SaveTaskOutput(persistCtx, task.ID, result.Stdout, result.Stderr, errMsg))
 	if result.Status == "completed" {
-		s.logErr(r.Context(), "update_task_status", s.store.UpdateTaskStatus(r.Context(), task.ID, "completed"))
-		s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.completed", "Codex task completed", mustJSON(result)))
+		s.logErr(persistCtx, "update_task_status", s.store.UpdateTaskStatus(persistCtx, task.ID, "completed"))
+		s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.completed", "Codex task completed", mustJSON(result)))
 	} else if result.Status == "timed_out" {
-		s.logErr(r.Context(), "update_task_status", s.store.UpdateTaskStatus(r.Context(), task.ID, "timed_out"))
-		s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.timed_out", "Codex task timed out", mustJSON(result)))
+		s.logErr(persistCtx, "update_task_status", s.store.UpdateTaskStatus(persistCtx, task.ID, "timed_out"))
+		s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.timed_out", "Codex task timed out", mustJSON(result)))
 	} else if result.Status == "canceled" {
-		s.logErr(r.Context(), "update_task_status", s.store.UpdateTaskStatus(r.Context(), task.ID, "canceled"))
-		s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.canceled", "Codex task canceled", mustJSON(result)))
+		s.logErr(persistCtx, "update_task_status", s.store.UpdateTaskStatus(persistCtx, task.ID, "canceled"))
+		s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.canceled", "Codex task canceled", mustJSON(result)))
 	} else {
-		s.logErr(r.Context(), "update_task_status", s.store.UpdateTaskStatus(r.Context(), task.ID, "failed"))
-		s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.failed", "Codex task failed", mustJSON(result)))
+		s.logErr(persistCtx, "update_task_status", s.store.UpdateTaskStatus(persistCtx, task.ID, "failed"))
+		s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.failed", "Codex task failed", mustJSON(result)))
 	}
 	writeJSON(w, http.StatusOK, result)
 }

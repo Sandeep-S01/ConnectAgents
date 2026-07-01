@@ -19,13 +19,14 @@ import (
 )
 
 type Bot struct {
-	token        string
-	userID       int64
-	baseURL      string
-	authToken    string
-	httpClient   *http.Client
-	logger       *slog.Logger
-	lastUpdateID int64
+	token         string
+	userID        int64
+	baseURL       string
+	authToken     string
+	httpClient    *http.Client
+	gatewayClient *http.Client
+	logger        *slog.Logger
+	lastUpdateID  int64
 }
 
 type Update struct {
@@ -65,12 +66,13 @@ func NewBot(token string, userID int64, gatewayAddr string, authToken string) *B
 	baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(host, port))
 
 	return &Bot{
-		token:      token,
-		userID:     userID,
-		baseURL:    baseURL,
-		authToken:  authToken,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		logger:     slog.Default().With("component", "telegram_bot"),
+		token:         token,
+		userID:        userID,
+		baseURL:       baseURL,
+		authToken:     authToken,
+		httpClient:    &http.Client{Timeout: 35 * time.Second},
+		gatewayClient: &http.Client{},
+		logger:        slog.Default().With("component", "telegram_bot"),
 	}
 }
 
@@ -128,7 +130,11 @@ func (b *Bot) getUpdates(ctx context.Context) ([]Update, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := b.httpClient.Do(req)
+	client := b.gatewayClient
+	if client == nil {
+		client = b.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

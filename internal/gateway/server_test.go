@@ -1753,6 +1753,50 @@ func TestServerTimesOutCodexTask(t *testing.T) {
 	}
 }
 
+func TestServerPersistsCodexTaskResultAfterRequestContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	runner := &cancelingAgentRunner{cancel: cancelRequest}
+	server := newTestServerWithOptions(t, gateway.Options{AgentRunner: runner})
+	task := createTestTask(t, server, t.TempDir())
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/tasks/"+task["id"].(string)+"/run", nil).WithContext(requestCtx)
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected run status 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	getTaskResponse := httptest.NewRecorder()
+	getTaskRequest := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task["id"].(string), nil)
+	server.ServeHTTP(getTaskResponse, getTaskRequest)
+	if getTaskResponse.Code != http.StatusOK {
+		t.Fatalf("expected get task status 200, got %d", getTaskResponse.Code)
+	}
+	var updatedTask map[string]any
+	if err := json.NewDecoder(getTaskResponse.Body).Decode(&updatedTask); err != nil {
+		t.Fatalf("decode updated task: %v", err)
+	}
+	if updatedTask["status"] != "waiting_for_approval" {
+		t.Fatalf("expected waiting_for_approval task status to be persisted, got %v", updatedTask["status"])
+	}
+
+	eventsResponse := httptest.NewRecorder()
+	eventsRequest := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task["id"].(string)+"/events", nil)
+	server.ServeHTTP(eventsResponse, eventsRequest)
+	if eventsResponse.Code != http.StatusOK {
+		t.Fatalf("expected events status 200, got %d", eventsResponse.Code)
+	}
+	var events []map[string]any
+	if err := json.NewDecoder(eventsResponse.Body).Decode(&events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if !hasEventType(events, "agent.plan_generated") {
+		t.Fatalf("expected agent.plan_generated event to be persisted, got %#v", events)
+	}
+}
+
 func TestServerRejectsConcurrentCodexRunsForSameProject(t *testing.T) {
 	t.Parallel()
 
@@ -2096,6 +2140,19 @@ func (r *fakeAgentRunner) RunCodex(_ context.Context, workdir string, prompt str
 		r.result.Status = "completed"
 	}
 	return r.result, nil
+}
+
+type cancelingAgentRunner struct {
+	cancel context.CancelFunc
+}
+
+func (r *cancelingAgentRunner) RunCodex(_ context.Context, _ string, _ string) (gateway.CommandResult, error) {
+	r.cancel()
+	return gateway.CommandResult{
+		Status:   "completed",
+		ExitCode: 0,
+		Stdout:   "finished after client disconnected",
+	}, nil
 }
 
 type blockingAgentRunner struct {

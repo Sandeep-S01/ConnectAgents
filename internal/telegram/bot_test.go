@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"personal-ai-assistant/internal/store"
 )
@@ -106,6 +107,20 @@ func TestSendMessageReturnsTelegramAPIError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "telegram API send failed") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewBotUsesSeparateGatewayClientWithoutShortTelegramTimeout(t *testing.T) {
+	bot := NewBot("test-token", 42, "127.0.0.1:8080", "auth-token")
+
+	if bot.httpClient.Timeout <= 20*time.Second {
+		t.Fatalf("telegram client timeout must exceed long-poll timeout, got %s", bot.httpClient.Timeout)
+	}
+	if bot.gatewayClient == nil {
+		t.Fatal("expected separate gateway client")
+	}
+	if bot.gatewayClient.Timeout != 0 {
+		t.Fatalf("gateway client should not use short Telegram timeout, got %s", bot.gatewayClient.Timeout)
 	}
 }
 
