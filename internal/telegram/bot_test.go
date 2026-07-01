@@ -123,6 +123,49 @@ func TestHelpIncludesStatusLogsAndCancelCommands(t *testing.T) {
 	}
 }
 
+func TestSetupShowsFirstTimePhoneWorkflow(t *testing.T) {
+	sent := &sentMessages{}
+	bot := newTestBot("http://127.0.0.1:8080", sent)
+
+	bot.handleMessage(context.Background(), ownerMessage("/setup"))
+
+	message := sent.joined()
+	for _, text := range []string{"First Time Setup", "127.0.0.1:8080", "/doctor", "/projects", "/addproject", "/testsetup"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("setup response missing %q:\n%s", text, message)
+		}
+	}
+}
+
+func TestTestSetupUsesGatewayDoctorEndpoint(t *testing.T) {
+	var paths []string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/doctor" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `{"status":"ok","checks":[{"name":"sqlite","status":"ok"},{"name":"git","status":"ok","message":"git version 2.50.0"},{"name":"codex","status":"ok","message":"codex version 0.1.0"}],"projects":[{"id":"proj_1","name":"Connect Agents","path":"D:\\Personal_Project\\ConnectAgents","status":"ok"}]}`)
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage("/testsetup"))
+
+	if got, want := strings.Join(paths, ","), "GET /api/doctor"; got != want {
+		t.Fatalf("unexpected gateway calls: got %q want %q", got, want)
+	}
+	message := sent.joined()
+	for _, text := range []string{"Setup Test", "Gateway reachable", "sqlite: ok", "git: ok", "codex: ok", "Connect Agents", "proj_1"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("testsetup response missing %q:\n%s", text, message)
+		}
+	}
+}
+
 func TestTaskAliasFetchesTaskStatus(t *testing.T) {
 	var paths []string
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

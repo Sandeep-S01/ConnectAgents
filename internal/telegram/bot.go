@@ -250,6 +250,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg Message) {
 	switch cmd {
 	case "/start", "/help":
 		b.handleHelp(msg.Chat.ID)
+	case "/setup":
+		b.handleSetup(msg.Chat.ID)
+	case "/testsetup":
+		b.handleTestSetup(msg.Chat.ID)
 	case "/projects":
 		b.handleProjects(msg.Chat.ID)
 	case "/addproject":
@@ -290,7 +294,14 @@ func (b *Bot) handleMessage(ctx context.Context, msg Message) {
 }
 
 func (b *Bot) handleHelp(chatID int64) {
-	help := `🤖 <b>Personal AI Assistant Gateway Bot</b>
+	help := `<b>Personal AI Assistant Gateway Bot</b>
+
+<b>First Time Setup:</b>
+/setup - Show phone setup checklist
+/testsetup - Run setup validation from the phone
+/doctor - Check gateway health, project access, and bot configuration
+/projects - List registered workspace projects
+/addproject &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Register a local project
 
 <b>Commands:</b>
 /projects - List registered workspace projects
@@ -298,6 +309,8 @@ func (b *Bot) handleHelp(chatID int64) {
 /updateproject &lt;project_id&gt; | &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Update a project
 /removeproject &lt;project_id&gt; - Remove a registered project
 /doctor - Check gateway health, project access, and bot configuration
+/setup - Show phone setup checklist
+/testsetup - Run setup validation from the phone
 /git &lt;project_id&gt; - Get short Git status and diff stats
 /commit &lt;project_id&gt; &lt;message&gt; - Stage all changes and commit
 /push &lt;project_id&gt; - Push current branch to remote origin
@@ -313,6 +326,75 @@ func (b *Bot) handleHelp(chatID int64) {
 /execute &lt;approval_id&gt; - Execute an approved command request`
 
 	b.sendMessage(chatID, help)
+}
+
+func (b *Bot) handleSetup(chatID int64) {
+	msg := fmt.Sprintf(`<b>First Time Setup</b>
+
+<b>Gateway URL:</b> <code>%s</code>
+
+1. Run <code>/testsetup</code> to validate the PC gateway.
+2. Run <code>/projects</code> to see registered projects.
+3. If no project is registered, run:
+<code>/addproject ConnectAgents | D:\Personal_Project\ConnectAgents | Go</code>
+4. Run <code>/doctor</code> any time something looks wrong.
+
+After a project exists, use:
+<code>/run &lt;project_id&gt; &lt;prompt&gt;</code>`,
+		escapeTelegram(b.baseURL),
+	)
+
+	b.sendMessage(chatID, msg)
+}
+
+func (b *Bot) handleTestSetup(chatID int64) {
+	var doctor struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+		Projects []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Path    string `json:"path"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"projects"`
+	}
+	if err := b.doGatewayRequest("GET", "/api/doctor", nil, &doctor); err != nil {
+		b.sendMessage(chatID, "<b>Setup Test</b>\n\nGateway reachable: failed\nError: "+escapeTelegram(err.Error()))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<b>Setup Test</b>\n\n")
+	sb.WriteString("Gateway reachable: ok\n")
+	sb.WriteString(fmt.Sprintf("Overall status: %s\n\n", escapeTelegram(doctor.Status)))
+	sb.WriteString("<b>Checks:</b>\n")
+	for _, check := range doctor.Checks {
+		sb.WriteString(fmt.Sprintf("- %s: %s", escapeTelegram(check.Name), escapeTelegram(check.Status)))
+		if check.Message != "" {
+			sb.WriteString(" - " + escapeTelegram(truncateText(check.Message, 140)))
+		}
+		sb.WriteString("\n")
+	}
+	if len(doctor.Projects) == 0 {
+		sb.WriteString("\nProjects: none registered\n")
+		sb.WriteString("Next: use /addproject to register a workspace.\n")
+	} else {
+		sb.WriteString("\n<b>Projects:</b>\n")
+		for _, project := range doctor.Projects {
+			sb.WriteString(fmt.Sprintf("- %s (<code>%s</code>): %s\n",
+				escapeTelegram(project.Name),
+				escapeTelegram(project.ID),
+				escapeTelegram(project.Status),
+			))
+		}
+	}
+
+	b.sendMessage(chatID, truncateText(sb.String(), 3900))
 }
 
 func (b *Bot) handleProjects(chatID int64) {

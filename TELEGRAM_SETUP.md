@@ -85,6 +85,18 @@ To inspect or disable it later, open Task Scheduler and look for `ConnectAgents 
 
 ## 5. Run Telegram Doctor
 
+Start with the phone setup checklist:
+
+```text
+/setup
+```
+
+Then run the compact setup test:
+
+```text
+/testsetup
+```
+
 From Telegram:
 
 ```text
@@ -167,6 +179,8 @@ Use:
 
 ```text
 /help
+/setup
+/testsetup
 /doctor
 /projects
 /addproject <name> | <absolute_path> [| tech_stack]
