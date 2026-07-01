@@ -1649,6 +1649,12 @@ func TestServerRunsCodexTask(t *testing.T) {
 	if res1["status"] != "waiting_for_approval" {
 		t.Fatalf("expected waiting_for_approval status, got %v", res1["status"])
 	}
+	if !strings.Contains(runner.prompt, "Task:\nRun safe command") {
+		t.Fatalf("expected planning prompt to include task, got %q", runner.prompt)
+	}
+	if strings.Contains(runner.prompt, "PLANNING MODE") {
+		t.Fatalf("expected planning prompt not to trigger planning mode, got %q", runner.prompt)
+	}
 
 	// Fetch pending approvals to find the generated plan approval
 	listRec := httptest.NewRecorder()
@@ -1794,6 +1800,50 @@ func TestServerPersistsCodexTaskResultAfterRequestContextCanceled(t *testing.T) 
 	}
 	if !hasEventType(events, "agent.plan_generated") {
 		t.Fatalf("expected agent.plan_generated event to be persisted, got %#v", events)
+	}
+}
+
+func TestServerDoesNotMarkCodexFailureCanceledWhenRequestContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	runner := &cancelingFailedAgentRunner{cancel: cancelRequest}
+	server := newTestServerWithOptions(t, gateway.Options{AgentRunner: runner})
+	task := createTestTask(t, server, t.TempDir())
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/tasks/"+task["id"].(string)+"/run", nil).WithContext(requestCtx)
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected run status 200, got %d: %s", response.Code, response.Body.String())
+	}
+
+	getTaskResponse := httptest.NewRecorder()
+	getTaskRequest := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task["id"].(string), nil)
+	server.ServeHTTP(getTaskResponse, getTaskRequest)
+	if getTaskResponse.Code != http.StatusOK {
+		t.Fatalf("expected get task status 200, got %d", getTaskResponse.Code)
+	}
+	var updatedTask map[string]any
+	if err := json.NewDecoder(getTaskResponse.Body).Decode(&updatedTask); err != nil {
+		t.Fatalf("decode updated task: %v", err)
+	}
+	if updatedTask["status"] != "failed" {
+		t.Fatalf("expected failed task status to be preserved, got %v", updatedTask["status"])
+	}
+
+	eventsResponse := httptest.NewRecorder()
+	eventsRequest := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task["id"].(string)+"/events", nil)
+	server.ServeHTTP(eventsResponse, eventsRequest)
+	if eventsResponse.Code != http.StatusOK {
+		t.Fatalf("expected events status 200, got %d", eventsResponse.Code)
+	}
+	var events []map[string]any
+	if err := json.NewDecoder(eventsResponse.Body).Decode(&events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if !hasEventType(events, "agent.failed") {
+		t.Fatalf("expected agent.failed event to be persisted, got %#v", events)
 	}
 }
 
@@ -2152,6 +2202,19 @@ func (r *cancelingAgentRunner) RunCodex(_ context.Context, _ string, _ string) (
 		Status:   "completed",
 		ExitCode: 0,
 		Stdout:   "finished after client disconnected",
+	}, nil
+}
+
+type cancelingFailedAgentRunner struct {
+	cancel context.CancelFunc
+}
+
+func (r *cancelingFailedAgentRunner) RunCodex(_ context.Context, _ string, _ string) (gateway.CommandResult, error) {
+	r.cancel()
+	return gateway.CommandResult{
+		Status:   "failed",
+		ExitCode: 1,
+		Stderr:   "codex failed after client disconnected",
 	}, nil
 }
 

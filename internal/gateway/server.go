@@ -721,7 +721,8 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runCtx, cancel := s.newTaskContext(r.Context())
+	taskParentCtx := context.WithoutCancel(r.Context())
+	runCtx, cancel := s.newTaskContext(taskParentCtx)
 	if !s.registerRunningTask(task.ID, cancel) {
 		cancel()
 		writeError(w, http.StatusConflict, errors.New("task is already running"))
@@ -744,7 +745,7 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 	if openaiKey != "" {
 		runCtx = context.WithValue(runCtx, "openai_api_key", openaiKey)
 	}
-	persistCtx := context.WithoutCancel(r.Context())
+	persistCtx := taskParentCtx
 
 	var result CommandResult
 	if task.AgentType == "llm" {
@@ -783,7 +784,7 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 
 		if !planApproved {
 			s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.started", "Generating execution plan...", ""))
-			planningPrompt := "SYSTEM INSTRUCTION: You are in PLANNING MODE. Write a detailed, bulleted markdown plan outlining which files you will inspect, modify, or create, and the commands you will run to accomplish the task below. DO NOT run any modifying commands or make any file edits yet. Output the plan and stop.\n\nTASK:\n" + task.Prompt
+			planningPrompt := "Create a concise execution plan for the task below. Do not edit files, run modifying commands, or ask clarifying questions. Return only the plan and stop.\n\nTask:\n" + task.Prompt
 			result, err = s.agentRunner.RunCodex(runCtx, project.Path, planningPrompt)
 			if err == nil && result.ExitCode == 0 {
 				_, approvalErr := s.store.CreateApprovalRequest(persistCtx, store.CreateApprovalRequestInput{
