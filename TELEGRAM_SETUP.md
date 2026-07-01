@@ -12,20 +12,39 @@ Create these values later when you are ready to run the real bot:
 - `PAIA_TELEGRAM_USER_ID`: Your numeric Telegram user ID.
 - `PAIA_AUTH_TOKEN`: A private gateway API token, at least 32 characters for production mode.
 
-## 2. Start The Gateway With Telegram
+## 2. Create Local Gateway Config
 
-PowerShell example:
+Copy the example config to a local secret file:
 
 ```powershell
 cd D:\Personal_Project\ConnectAgents
-
-$env:PAIA_ADDR = "127.0.0.1:8080"
-$env:PAIA_AUTH_TOKEN = "change-this-token-to-at-least-32-chars"
-$env:PAIA_TELEGRAM_BOT_TOKEN = "your_bot_token_here"
-$env:PAIA_TELEGRAM_USER_ID = "your_numeric_telegram_user_id"
-
-go run ./cmd/gateway
+Copy-Item .gateway.local.example.ps1 .gateway.local.ps1
+notepad .gateway.local.ps1
 ```
+
+Fill in:
+
+- `PAIA_AUTH_TOKEN`
+- `PAIA_TELEGRAM_BOT_TOKEN`
+- `PAIA_TELEGRAM_USER_ID`
+
+The real `.gateway.local.ps1` file is ignored by Git.
+
+## 3. Start The Gateway Manually
+
+Run this first so you can see startup errors directly:
+
+```powershell
+cd D:\Personal_Project\ConnectAgents
+.\scripts\start-gateway.ps1
+```
+
+The script:
+
+- Loads `.gateway.local.ps1`.
+- Creates `data\` and `logs\` if missing.
+- Starts `go run ./cmd/gateway`.
+- Stops early if Telegram is enabled without `PAIA_AUTH_TOKEN`.
 
 When the bot starts, it sends a Telegram message to the configured user:
 
@@ -47,7 +66,24 @@ If Telegram is enabled and `PAIA_AUTH_TOKEN` is empty, the gateway starts for lo
 
 If the startup Telegram message cannot be sent, check the gateway logs for `telegram startup message failed`. That usually means the bot token is wrong, the owner user ID is wrong, or the bot has not been opened from your Telegram account yet.
 
-## 3. Run Telegram Doctor
+## 4. Start The Gateway At Windows Login
+
+After manual startup works, register a Windows Task Scheduler task:
+
+```powershell
+cd D:\Personal_Project\ConnectAgents
+.\scripts\install-startup-task.ps1
+```
+
+Start it immediately without waiting for the next login:
+
+```powershell
+Start-ScheduledTask -TaskName "ConnectAgents Gateway"
+```
+
+To inspect or disable it later, open Task Scheduler and look for `ConnectAgents Gateway`.
+
+## 5. Run Telegram Doctor
 
 From Telegram:
 
@@ -63,7 +99,7 @@ Expected checks:
 - Registered project paths still exist.
 - Gateway URL points to the local gateway address.
 
-## 4. Register A Project From Telegram
+## 6. Register A Project From Telegram
 
 Use pipe separators so Windows paths and project names can contain spaces:
 
@@ -91,7 +127,7 @@ To remove a registered project:
 /removeproject <project_id>
 ```
 
-## 5. Smoke Test A Codex Task
+## 7. Smoke Test A Codex Task
 
 Start with a harmless prompt:
 
@@ -113,7 +149,7 @@ If a task is still running and should be stopped:
 /cancel <task_id>
 ```
 
-## 6. Approval Flow
+## 8. Approval Flow
 
 If the gateway creates an approval request, Telegram sends the approval ID.
 

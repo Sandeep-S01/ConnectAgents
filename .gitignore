@@ -1,5 +1,6 @@
 data/
 logs/
+.gateway.local.ps1
 *.exe
 *.test
 *.out

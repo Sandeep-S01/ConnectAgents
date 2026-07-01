@@ -94,6 +94,8 @@ The dashboard is served by the Go gateway and provides project registration, tas
 
 Telegram is the first phone control surface. See `TELEGRAM_SETUP.md` for BotFather setup, gateway environment variables, `/doctor`, `/addproject`, and the phone-to-PC smoke test flow.
 
+For Windows startup, copy `.gateway.local.example.ps1` to `.gateway.local.ps1`, fill in your private values, run `.\scripts\start-gateway.ps1` once manually, then use `.\scripts\install-startup-task.ps1` to start the gateway at login.
+
 ## API
 
 Health:
