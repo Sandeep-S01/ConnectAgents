@@ -262,6 +262,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg Message) {
 		b.handleTestSetup(msg.Chat.ID)
 	case "/projects":
 		b.handleProjects(msg.Chat.ID)
+	case "/bridges":
+		b.handleBridges(msg.Chat.ID)
 	case "/addproject":
 		b.handleAddProject(msg.Chat.ID, text)
 	case "/updateproject":
@@ -307,10 +309,12 @@ func (b *Bot) handleHelp(chatID int64) {
 /testsetup - Run setup validation from the phone
 /doctor - Check gateway health, project access, and bot configuration
 /projects - List registered workspace projects
+/bridges - List connected VS Code bridges
 /addproject &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Register a local project
 
 <b>Commands:</b>
 /projects - List registered workspace projects
+/bridges - List connected VS Code bridges
 /addproject &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Register a local project
 /updateproject &lt;project_id&gt; | &lt;name&gt; | &lt;absolute_path&gt; [| tech_stack] - Update a project
 /removeproject &lt;project_id&gt; - Remove a registered project
@@ -422,6 +426,30 @@ func (b *Bot) handleProjects(chatID int64) {
 	}
 
 	b.sendMessage(chatID, sb.String())
+}
+
+func (b *Bot) handleBridges(chatID int64) {
+	var bridges []map[string]any
+	if err := b.doGatewayRequest("GET", "/api/bridge", nil, &bridges); err != nil {
+		b.sendMessage(chatID, "Failed to list VS Code bridges: "+err.Error())
+		return
+	}
+	if len(bridges) == 0 {
+		b.sendMessage(chatID, "No VS Code bridges are connected.")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<b>Connected VS Code Bridges:</b>\n\n")
+	for _, bridge := range bridges {
+		sb.WriteString(fmt.Sprintf("- <b>%s</b>\n  ID: <code>%s</code>\n  Path: <code>%s</code>\n  Queue: <code>%s</code>\n\n",
+			escapeTelegram(formatAny(bridge["workspaceName"])),
+			escapeTelegram(formatAny(bridge["bridgeId"])),
+			escapeTelegram(formatAny(bridge["workspacePath"])),
+			escapeTelegram(formatAny(bridge["queuedTasks"])),
+		))
+	}
+	b.sendMessage(chatID, truncateText(sb.String(), 3900))
 }
 
 func (b *Bot) handleAddProject(chatID int64, text string) {
@@ -822,7 +850,7 @@ func (b *Bot) handleCancel(chatID int64, args []string) {
 
 func (b *Bot) handleResolveApproval(chatID int64, args []string, action string) {
 	if len(args) == 0 {
-		b.sendMessage(chatID, fmt.Sprintf("⚠️ Usage: <code>/%s &lt;approval_id&gt;</code>", action))
+		b.sendMessage(chatID, fmt.Sprintf("Usage: <code>/%s &lt;approval_id&gt;</code>", action))
 		return
 	}
 	approvalID := args[0]
@@ -830,11 +858,26 @@ func (b *Bot) handleResolveApproval(chatID int64, args []string, action string) 
 	path := fmt.Sprintf("/api/approvals/%s/%s", url.PathEscape(approvalID), action)
 	var approval map[string]any
 	if err := b.doGatewayRequest("POST", path, nil, &approval); err != nil {
-		b.sendMessage(chatID, fmt.Sprintf("❌ Failed to %s request: %s", action, err.Error()))
+		b.sendMessage(chatID, fmt.Sprintf("Failed to %s request: %s", action, err.Error()))
 		return
 	}
 
-	b.sendMessage(chatID, fmt.Sprintf("✅ Request <code>%s</code> has been successfully %sd.", approvalID, action))
+	b.sendMessage(chatID, fmt.Sprintf("Request <code>%s</code> has been successfully %sd.", approvalID, action))
+	if action == "approve" && approval["actionType"] == "task_plan" {
+		taskID, ok := approval["taskId"].(string)
+		if !ok || taskID == "" {
+			b.sendMessage(chatID, fmt.Sprintf("Approved request <code>%s</code>, but task ID was missing from the response.", approvalID))
+			return
+		}
+		b.sendMessage(chatID, fmt.Sprintf("Starting approved Codex task <code>%s</code>...", taskID))
+		go func() {
+			runPath := "/api/tasks/" + url.PathEscape(taskID) + "/run"
+			var result map[string]any
+			if err := b.doGatewayRequest("POST", runPath, nil, &result); err != nil {
+				b.sendMessage(b.userID, fmt.Sprintf("Codex run failed for Task <code>%s</code>: %s", taskID, err.Error()))
+			}
+		}()
+	}
 }
 
 func (b *Bot) handleExecute(chatID int64, args []string) {
@@ -922,7 +965,11 @@ func (b *Bot) doGatewayRequest(method, path string, reqBody any, respOut any) er
 		req.Header.Set("Authorization", "Bearer "+b.authToken)
 	}
 
-	resp, err := b.httpClient.Do(req)
+	client := b.gatewayClient
+	if client == nil {
+		client = b.httpClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

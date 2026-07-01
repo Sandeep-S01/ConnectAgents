@@ -1,0 +1,62 @@
+{
+  "name": "connectagents-vscode-bridge",
+  "displayName": "ConnectAgents VS Code Bridge",
+  "description": "Connects an open VS Code workspace to the local ConnectAgents gateway.",
+  "version": "0.1.0",
+  "publisher": "connectagents",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:connectAgents.registerBridge",
+    "onCommand:connectAgents.pollOnce",
+    "onCommand:connectAgents.showStatus"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "connectAgents.registerBridge",
+        "title": "ConnectAgents: Register VS Code Bridge"
+      },
+      {
+        "command": "connectAgents.pollOnce",
+        "title": "ConnectAgents: Poll Gateway Once"
+      },
+      {
+        "command": "connectAgents.showStatus",
+        "title": "ConnectAgents: Show Bridge Status"
+      }
+    ],
+    "configuration": {
+      "title": "ConnectAgents",
+      "properties": {
+        "connectAgents.gatewayUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8080",
+          "description": "Local ConnectAgents gateway base URL."
+        },
+        "connectAgents.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for the local ConnectAgents gateway."
+        },
+        "connectAgents.pollIntervalMs": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 500,
+          "description": "Polling interval for bridge task pickup."
+        },
+        "connectAgents.codexCommand": {
+          "type": "string",
+          "default": "chatgpt.newCodexPanel",
+          "description": "VS Code command ID to invoke for each task prompt. The default opens a new Codex agent panel. The prompt is always copied to the clipboard and written to the bridge output."
+        }
+      }
+    }
+  }
+}

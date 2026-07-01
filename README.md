@@ -96,6 +96,43 @@ Telegram is the first phone control surface. See `TELEGRAM_SETUP.md` for BotFath
 
 For Windows startup, copy `.gateway.local.example.ps1` to `.gateway.local.ps1`, fill in your private values, run `.\scripts\start-gateway.ps1` once manually, then use `.\scripts\install-startup-task.ps1` to start the gateway at login.
 
+## VS Code Bridge
+
+Phase 1 of the VS Code bridge lives in `vscode-bridge/`.
+
+The bridge extension:
+
+- Registers the currently open VS Code workspace with the local gateway.
+- Polls the gateway for queued tasks for that workspace.
+- Reports task progress and completion back to the gateway.
+- Optionally invokes a configured VS Code command with the prompt.
+
+Current gateway flow:
+
+```text
+Telegram / PWA
+  -> Go Gateway
+  -> registered VS Code bridge, when the project path is open in VS Code
+  -> Codex CLI fallback, when no VS Code bridge is registered
+```
+
+To try the bridge locally:
+
+```powershell
+.\scripts\start-vscode-bridge-dev.ps1
+```
+
+That opens VS Code with `vscode-bridge/` loaded as a development extension against the ConnectAgents workspace. Configure `connectAgents.gatewayUrl`, `connectAgents.authToken`, and optionally `connectAgents.codexCommand`. The default command is `chatgpt.newCodexPanel`, which opens a Codex agent panel. The bridge always copies the mobile prompt to the clipboard and writes it to the `ConnectAgents Bridge` output channel.
+
+Phone-to-VS-Code flow:
+
+1. Start the gateway with `.\scripts\start-gateway.ps1`.
+2. Start the bridge with `.\scripts\start-vscode-bridge-dev.ps1`.
+3. Send `/run <project_id> <prompt>` from Telegram.
+4. Approve the generated task plan with `/approve <approval_id>`.
+5. The gateway dispatches the task to the VS Code bridge instead of starting `codex exec`.
+6. The bridge opens Codex, copies the prompt, and records task progress back to the gateway.
+
 ## API
 
 Health:

@@ -111,6 +111,19 @@ Expected checks:
 - Registered project paths still exist.
 - Gateway URL points to the local gateway address.
 
+If you want Telegram tasks to route into VS Code instead of the Codex CLI fallback, start the bridge:
+
+```powershell
+cd D:\Personal_Project\ConnectAgents
+.\scripts\start-vscode-bridge-dev.ps1
+```
+
+Then verify from Telegram:
+
+```text
+/bridges
+```
+
 ## 6. Register A Project From Telegram
 
 Use pipe separators so Windows paths and project names can contain spaces:
@@ -183,6 +196,7 @@ Use:
 /testsetup
 /doctor
 /projects
+/bridges
 /addproject <name> | <absolute_path> [| tech_stack]
 /updateproject <project_id> | <name> | <absolute_path> [| tech_stack]
 /removeproject <project_id>

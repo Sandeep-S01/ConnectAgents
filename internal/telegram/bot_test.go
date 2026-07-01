@@ -124,6 +124,29 @@ func TestNewBotUsesSeparateGatewayClientWithoutShortTelegramTimeout(t *testing.T
 	}
 }
 
+func TestGatewayRequestsUseGatewayClient(t *testing.T) {
+	bot := NewBot("test-token", 42, "127.0.0.1:8080", "auth-token")
+	bot.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			t.Fatalf("gateway request unexpectedly used telegram client for %s", r.URL.String())
+			return nil, nil
+		}),
+	}
+	bot.gatewayClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/api/doctor" {
+				t.Fatalf("unexpected gateway path: %s", r.URL.Path)
+			}
+			return jsonResponse(http.StatusOK, `{"status":"ok"}`), nil
+		}),
+	}
+
+	var result map[string]any
+	if err := bot.doGatewayRequest(http.MethodGet, "/api/doctor", nil, &result); err != nil {
+		t.Fatalf("gateway request failed: %v", err)
+	}
+}
+
 func TestHelpIncludesStatusLogsAndCancelCommands(t *testing.T) {
 	sent := &sentMessages{}
 	bot := newTestBot("", sent)
@@ -210,6 +233,35 @@ func TestTaskAliasFetchesTaskStatus(t *testing.T) {
 	}
 }
 
+func TestBridgesListsConnectedVSCodeBridges(t *testing.T) {
+	var methodPath string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methodPath = r.Method + " " + r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/bridge" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `[{"bridgeId":"bridge_1","workspaceName":"ConnectAgents","workspacePath":"D:\\Personal_Project\\ConnectAgents","queuedTasks":2}]`)
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleMessage(context.Background(), ownerMessage("/bridges"))
+
+	if methodPath != "GET /api/bridge" {
+		t.Fatalf("unexpected gateway call: %s", methodPath)
+	}
+	message := sent.joined()
+	for _, text := range []string{"Connected VS Code Bridges", "bridge_1", "ConnectAgents", "Queue"} {
+		if !strings.Contains(message, text) {
+			t.Fatalf("bridges response missing %q:\n%s", text, message)
+		}
+	}
+}
+
 func TestRunTestPostsToProjectTestEndpoint(t *testing.T) {
 	var methodPath string
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +312,37 @@ func TestCompletedEventIncludesTaskOutputSummary(t *testing.T) {
 		if !strings.Contains(message, text) {
 			t.Fatalf("completion notification missing %q:\n%s", text, message)
 		}
+	}
+}
+
+func TestApproveTaskPlanStartsCodexRun(t *testing.T) {
+	runCalled := make(chan string, 1)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/approvals/appr_1/approve":
+			io.WriteString(w, `{"id":"appr_1","taskId":"task_1","actionType":"task_plan","status":"approved"}`)
+		case "POST /api/tasks/task_1/run":
+			runCalled <- r.Method + " " + r.URL.Path
+			io.WriteString(w, `{"status":"completed","stdout":"done"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+
+	sent := &sentMessages{}
+	bot := newTestBot(gateway.URL, sent)
+
+	bot.handleResolveApproval(42, []string{"appr_1"}, "approve")
+
+	select {
+	case got := <-runCalled:
+		if got != "POST /api/tasks/task_1/run" {
+			t.Fatalf("unexpected run request: %s", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected approved task plan to start codex run")
 	}
 }
 

@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,9 +126,29 @@ type Server struct {
 	runningMu          sync.Mutex
 	runningTasks       map[string]context.CancelFunc
 	runningProjects    map[string]string
+	bridgeMu           sync.Mutex
+	bridges            map[string]*bridgeRegistration
+	bridgesByPath      map[string]string
 	streamMu           sync.Mutex
 	streams            map[string]map[chan store.TaskEvent]struct{}
 	onTaskEvent        func(store.TaskEvent)
+}
+
+type bridgeRegistration struct {
+	ID            string
+	WorkspacePath string
+	WorkspaceName string
+	Queue         []bridgeTask
+}
+
+type bridgeTask struct {
+	TaskID      string `json:"taskId"`
+	ProjectID   string `json:"projectId"`
+	ProjectPath string `json:"projectPath"`
+	ProjectName string `json:"projectName"`
+	TechStack   string `json:"techStack,omitempty"`
+	GitBranch   string `json:"gitBranch,omitempty"`
+	Prompt      string `json:"prompt"`
 }
 
 func NewServer(dataStore Store, options Options) http.Handler {
@@ -181,6 +203,8 @@ func NewServer(dataStore Store, options Options) http.Handler {
 		apiWriteWindows:    make(map[string]rateLimitWindow),
 		runningTasks:       make(map[string]context.CancelFunc),
 		runningProjects:    make(map[string]string),
+		bridges:            make(map[string]*bridgeRegistration),
+		bridgesByPath:      make(map[string]string),
 		streams:            make(map[string]map[chan store.TaskEvent]struct{}),
 		onTaskEvent:        options.OnTaskEvent,
 	}
@@ -262,6 +286,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{taskID}/run", s.handleRunTaskAgent)
 	s.mux.HandleFunc("POST /api/tasks/{taskID}/cancel", s.handleCancelTask)
 	s.mux.HandleFunc("POST /api/tasks/{taskID}/commands", s.handleRunTaskCommand)
+	s.mux.HandleFunc("POST /api/bridge/register", s.handleRegisterBridge)
+	s.mux.HandleFunc("GET /api/bridge", s.handleListBridges)
+	s.mux.HandleFunc("GET /api/bridge/{bridgeID}/tasks/next", s.handleNextBridgeTask)
+	s.mux.HandleFunc("POST /api/bridge/{bridgeID}/tasks/{taskID}/events", s.handleBridgeTaskEvent)
 	s.mux.HandleFunc("POST /api/tasks/{taskID}/approvals", s.handleCreateApprovalRequest)
 	s.mux.HandleFunc("GET /api/approvals", s.handleListApprovalRequests)
 	s.mux.HandleFunc("POST /api/approvals/{approvalID}/approve", s.handleApproveApprovalRequest)
@@ -784,30 +812,50 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 
 		if !planApproved {
 			s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.started", "Generating execution plan...", ""))
-			planningPrompt := "Create a concise execution plan for the task below. Do not edit files, run modifying commands, or ask clarifying questions. Return only the plan and stop.\n\nTask:\n" + task.Prompt
-			result, err = s.agentRunner.RunCodex(runCtx, project.Path, planningPrompt)
-			if err == nil && result.ExitCode == 0 {
-				_, approvalErr := s.store.CreateApprovalRequest(persistCtx, store.CreateApprovalRequestInput{
+			plan := buildTaskPlan(task.Prompt, project.Path)
+			_, approvalErr := s.store.CreateApprovalRequest(persistCtx, store.CreateApprovalRequestInput{
+				TaskID:      task.ID,
+				ActionType:  "task_plan",
+				Description: "Approve execution plan for task: " + task.Prompt,
+				PayloadJSON: mustJSON(map[string]string{
+					"plan": plan,
+				}),
+			})
+			if approvalErr != nil {
+				s.logErr(r.Context(), "create_plan_approval", approvalErr)
+			}
+			s.logErr(persistCtx, "update_task_status", s.store.UpdateTaskStatus(persistCtx, task.ID, "waiting_for_approval"))
+			s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.plan_generated", "Execution plan generated, waiting for approval", plan))
+			s.logErr(persistCtx, "publish_task_event", s.publishLatestTaskEvent(persistCtx, task.ID))
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": "waiting_for_approval",
+				"plan":   plan,
+			})
+			return
+		} else {
+			if bridgeID, ok := s.bridgeForProject(project.Path); ok {
+				queued := bridgeTask{
 					TaskID:      task.ID,
-					ActionType:  "task_plan",
-					Description: "Approve execution plan for task: " + task.Prompt,
-					PayloadJSON: mustJSON(map[string]string{
-						"plan": result.Stdout,
-					}),
-				})
-				if approvalErr != nil {
-					s.logErr(r.Context(), "create_plan_approval", approvalErr)
+					ProjectID:   project.ID,
+					ProjectPath: project.Path,
+					ProjectName: project.Name,
+					TechStack:   project.TechStack,
+					GitBranch:   project.DefaultBranch,
+					Prompt:      task.Prompt,
 				}
-				s.logErr(persistCtx, "update_task_status", s.store.UpdateTaskStatus(persistCtx, task.ID, "waiting_for_approval"))
-				s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.plan_generated", "Execution plan generated, waiting for approval", result.Stdout))
+				if err := s.enqueueBridgeTask(bridgeID, queued); err != nil {
+					writeError(w, http.StatusConflict, err)
+					return
+				}
+				s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.dispatched", "Task dispatched to VS Code bridge", mustJSON(queued)))
 				s.logErr(persistCtx, "publish_task_event", s.publishLatestTaskEvent(persistCtx, task.ID))
-				writeJSON(w, http.StatusOK, map[string]any{
-					"status": "waiting_for_approval",
-					"plan":   result.Stdout,
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"status":   "dispatched_to_bridge",
+					"bridgeId": bridgeID,
+					"taskId":   task.ID,
 				})
 				return
 			}
-		} else {
 			s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), task.ID, "agent.started", "Starting Codex task execution", ""))
 			result, err = s.agentRunner.RunCodex(runCtx, project.Path, task.Prompt)
 		}
@@ -861,6 +909,189 @@ func (s *Server) handleRunTaskAgent(w http.ResponseWriter, r *http.Request) {
 		s.logErr(persistCtx, "add_task_event", s.addTaskEvent(persistCtx, task.ID, "agent.failed", "Codex task failed", mustJSON(result)))
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func buildTaskPlan(prompt string, projectPath string) string {
+	return strings.Join([]string{
+		"1. Run Codex in the registered project workspace.",
+		"2. Use this exact user prompt: " + prompt,
+		"3. Let Codex inspect or modify files as needed for the prompt.",
+		"4. Save the final stdout, stderr, status, and task events for Telegram status/log commands.",
+		"",
+		"Project path: " + projectPath,
+	}, "\n")
+}
+
+func (s *Server) handleRegisterBridge(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		WorkspacePath string `json:"workspacePath"`
+		WorkspaceName string `json:"workspaceName"`
+	}
+	if err := s.decodeJSON(w, r, &request); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	workspacePath := strings.TrimSpace(request.WorkspacePath)
+	if workspacePath == "" {
+		writeError(w, http.StatusBadRequest, errors.New("workspacePath is required"))
+		return
+	}
+	absPath, err := filepath.Abs(workspacePath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("resolve workspace path: %w", err))
+		return
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("workspace path must exist: %w", err))
+		return
+	}
+	bridgeID := "bridge_" + randomHexID()
+	bridge := &bridgeRegistration{
+		ID:            bridgeID,
+		WorkspacePath: absPath,
+		WorkspaceName: strings.TrimSpace(request.WorkspaceName),
+	}
+	s.bridgeMu.Lock()
+	s.bridges[bridgeID] = bridge
+	s.bridgesByPath[absPath] = bridgeID
+	s.bridgeMu.Unlock()
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"bridgeId":      bridgeID,
+		"workspacePath": absPath,
+		"workspaceName": bridge.WorkspaceName,
+	})
+}
+
+func (s *Server) handleListBridges(w http.ResponseWriter, r *http.Request) {
+	type bridgeSummary struct {
+		BridgeID      string `json:"bridgeId"`
+		WorkspacePath string `json:"workspacePath"`
+		WorkspaceName string `json:"workspaceName"`
+		QueuedTasks   int    `json:"queuedTasks"`
+	}
+	s.bridgeMu.Lock()
+	bridges := make([]bridgeSummary, 0, len(s.bridges))
+	for _, bridge := range s.bridges {
+		bridges = append(bridges, bridgeSummary{
+			BridgeID:      bridge.ID,
+			WorkspacePath: bridge.WorkspacePath,
+			WorkspaceName: bridge.WorkspaceName,
+			QueuedTasks:   len(bridge.Queue),
+		})
+	}
+	s.bridgeMu.Unlock()
+	writeJSON(w, http.StatusOK, bridges)
+}
+
+func (s *Server) handleNextBridgeTask(w http.ResponseWriter, r *http.Request) {
+	bridgeID := r.PathValue("bridgeID")
+	s.bridgeMu.Lock()
+	bridge, ok := s.bridges[bridgeID]
+	if !ok {
+		s.bridgeMu.Unlock()
+		writeError(w, http.StatusNotFound, errors.New("bridge not found"))
+		return
+	}
+	if len(bridge.Queue) == 0 {
+		s.bridgeMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	task := bridge.Queue[0]
+	bridge.Queue = bridge.Queue[1:]
+	s.bridgeMu.Unlock()
+
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handleBridgeTaskEvent(w http.ResponseWriter, r *http.Request) {
+	bridgeID := r.PathValue("bridgeID")
+	taskID := r.PathValue("taskID")
+	s.bridgeMu.Lock()
+	_, ok := s.bridges[bridgeID]
+	s.bridgeMu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("bridge not found"))
+		return
+	}
+
+	var request struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Stdout  string `json:"stdout"`
+		Stderr  string `json:"stderr"`
+	}
+	if err := s.decodeJSON(w, r, &request); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	status := strings.TrimSpace(request.Status)
+	if status == "" {
+		status = "running"
+	}
+	message := strings.TrimSpace(request.Message)
+	if message == "" {
+		message = "VS Code bridge task update"
+	}
+
+	eventType := "agent.bridge_update"
+	switch status {
+	case "running":
+		eventType = "agent.started"
+	case "completed":
+		eventType = "agent.completed"
+	case "failed":
+		eventType = "agent.failed"
+	case "canceled", "cancelled":
+		status = "canceled"
+		eventType = "agent.canceled"
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("unsupported bridge task status"))
+		return
+	}
+
+	if status == "completed" || status == "failed" || status == "canceled" {
+		errMsg := ""
+		if status != "completed" {
+			errMsg = request.Stderr
+		}
+		s.logErr(r.Context(), "save_task_output", s.store.SaveTaskOutput(r.Context(), taskID, request.Stdout, request.Stderr, errMsg))
+		s.logErr(r.Context(), "update_task_status", s.store.UpdateTaskStatus(r.Context(), taskID, status))
+	}
+	s.logErr(r.Context(), "add_task_event", s.addTaskEvent(r.Context(), taskID, eventType, message, mustJSON(request)))
+	s.logErr(r.Context(), "publish_task_event", s.publishLatestTaskEvent(r.Context(), taskID))
+	writeJSON(w, http.StatusOK, map[string]string{"status": status})
+}
+
+func (s *Server) bridgeForProject(projectPath string) (string, bool) {
+	absPath, err := filepath.Abs(projectPath)
+	if err != nil {
+		return "", false
+	}
+	s.bridgeMu.Lock()
+	defer s.bridgeMu.Unlock()
+	bridgeID, ok := s.bridgesByPath[absPath]
+	return bridgeID, ok
+}
+
+func (s *Server) enqueueBridgeTask(bridgeID string, task bridgeTask) error {
+	s.bridgeMu.Lock()
+	defer s.bridgeMu.Unlock()
+	bridge, ok := s.bridges[bridgeID]
+	if !ok {
+		return errors.New("bridge not found")
+	}
+	bridge.Queue = append(bridge.Queue, task)
+	return nil
+}
+
+func randomHexID() string {
+	var bytes [8]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(bytes[:])
 }
 
 func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {

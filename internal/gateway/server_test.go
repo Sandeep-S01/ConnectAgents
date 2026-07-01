@@ -1649,11 +1649,15 @@ func TestServerRunsCodexTask(t *testing.T) {
 	if res1["status"] != "waiting_for_approval" {
 		t.Fatalf("expected waiting_for_approval status, got %v", res1["status"])
 	}
-	if !strings.Contains(runner.prompt, "Task:\nRun safe command") {
-		t.Fatalf("expected planning prompt to include task, got %q", runner.prompt)
+	if runner.calls != 0 {
+		t.Fatalf("expected runner not to be called for deterministic plan generation, got %d calls", runner.calls)
 	}
-	if strings.Contains(runner.prompt, "PLANNING MODE") {
-		t.Fatalf("expected planning prompt not to trigger planning mode, got %q", runner.prompt)
+	plan, _ := res1["plan"].(string)
+	if !strings.Contains(plan, "Run safe command") {
+		t.Fatalf("expected deterministic plan to include task prompt, got %q", plan)
+	}
+	if strings.Contains(plan, "thread.started") || strings.Contains(plan, "superpowers") {
+		t.Fatalf("expected deterministic plan not to contain codex JSONL or skill output, got %q", plan)
 	}
 
 	// Fetch pending approvals to find the generated plan approval
@@ -1695,14 +1699,112 @@ func TestServerRunsCodexTask(t *testing.T) {
 	if result["status"] != "completed" {
 		t.Fatalf("expected completed status, got %v", result["status"])
 	}
-	if runner.calls != 2 {
-		t.Fatalf("expected runner to be called twice (planning + execution), got %d", runner.calls)
+	if runner.calls != 1 {
+		t.Fatalf("expected runner to be called once for approved execution, got %d", runner.calls)
 	}
 	if runner.workdir != projectPath {
 		t.Fatalf("expected runner workdir %q, got %q", projectPath, runner.workdir)
 	}
 	if runner.prompt != "Run safe command" {
 		t.Fatalf("expected task prompt to be passed, got %q", runner.prompt)
+	}
+}
+
+func TestServerDispatchesCodexTaskToRegisteredVSCodeBridge(t *testing.T) {
+	t.Parallel()
+
+	projectPath := t.TempDir()
+	runner := &fakeAgentRunner{}
+	server := newTestServerWithOptions(t, gateway.Options{AgentRunner: runner})
+	task := createTestTask(t, server, projectPath)
+	createApprovedTaskPlan(t, server, task["id"].(string))
+
+	registerResponse := doJSON(t, server, http.MethodPost, "/api/bridge/register", map[string]string{
+		"workspacePath": projectPath,
+		"workspaceName": "Bridge Project",
+	})
+	if registerResponse.Code != http.StatusCreated {
+		t.Fatalf("expected bridge register status 201, got %d: %s", registerResponse.Code, registerResponse.Body.String())
+	}
+	var registered map[string]any
+	if err := json.NewDecoder(registerResponse.Body).Decode(&registered); err != nil {
+		t.Fatalf("decode bridge registration: %v", err)
+	}
+	bridgeID, _ := registered["bridgeId"].(string)
+	if bridgeID == "" {
+		t.Fatalf("expected bridge id in response: %#v", registered)
+	}
+	listResponse := httptest.NewRecorder()
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/bridge", nil)
+	server.ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("expected bridge list status 200, got %d: %s", listResponse.Code, listResponse.Body.String())
+	}
+	var bridges []map[string]any
+	if err := json.NewDecoder(listResponse.Body).Decode(&bridges); err != nil {
+		t.Fatalf("decode bridge list: %v", err)
+	}
+	if len(bridges) != 1 || bridges[0]["bridgeId"] != bridgeID {
+		t.Fatalf("expected registered bridge in list, got %#v", bridges)
+	}
+
+	runResponse := httptest.NewRecorder()
+	runRequest := httptest.NewRequest(http.MethodPost, "/api/tasks/"+task["id"].(string)+"/run", nil)
+	server.ServeHTTP(runResponse, runRequest)
+	if runResponse.Code != http.StatusAccepted {
+		t.Fatalf("expected run status 202, got %d: %s", runResponse.Code, runResponse.Body.String())
+	}
+	if runner.calls != 0 {
+		t.Fatalf("expected codex CLI runner not to be called when bridge is registered, got %d", runner.calls)
+	}
+
+	nextResponse := httptest.NewRecorder()
+	nextRequest := httptest.NewRequest(http.MethodGet, "/api/bridge/"+bridgeID+"/tasks/next", nil)
+	server.ServeHTTP(nextResponse, nextRequest)
+	if nextResponse.Code != http.StatusOK {
+		t.Fatalf("expected next task status 200, got %d: %s", nextResponse.Code, nextResponse.Body.String())
+	}
+	var nextTask map[string]any
+	if err := json.NewDecoder(nextResponse.Body).Decode(&nextTask); err != nil {
+		t.Fatalf("decode next bridge task: %v", err)
+	}
+	if nextTask["taskId"] != task["id"] {
+		t.Fatalf("expected bridge task id %v, got %v", task["id"], nextTask["taskId"])
+	}
+	if nextTask["prompt"] != "Run safe command" {
+		t.Fatalf("expected task prompt to be queued, got %v", nextTask["prompt"])
+	}
+	if nextTask["projectPath"] != projectPath {
+		t.Fatalf("expected project path %q, got %v", projectPath, nextTask["projectPath"])
+	}
+	if nextTask["projectName"] != "Command Project" {
+		t.Fatalf("expected project name in bridge task, got %v", nextTask["projectName"])
+	}
+
+	eventResponse := doJSON(t, server, http.MethodPost, "/api/bridge/"+bridgeID+"/tasks/"+task["id"].(string)+"/events", map[string]string{
+		"status":  "completed",
+		"message": "VS Code bridge completed task",
+		"stdout":  "bridge result",
+	})
+	if eventResponse.Code != http.StatusOK {
+		t.Fatalf("expected bridge event status 200, got %d: %s", eventResponse.Code, eventResponse.Body.String())
+	}
+
+	getTaskResponse := httptest.NewRecorder()
+	getTaskRequest := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task["id"].(string), nil)
+	server.ServeHTTP(getTaskResponse, getTaskRequest)
+	if getTaskResponse.Code != http.StatusOK {
+		t.Fatalf("expected get task status 200, got %d", getTaskResponse.Code)
+	}
+	var updatedTask map[string]any
+	if err := json.NewDecoder(getTaskResponse.Body).Decode(&updatedTask); err != nil {
+		t.Fatalf("decode updated task: %v", err)
+	}
+	if updatedTask["status"] != "completed" {
+		t.Fatalf("expected completed task status, got %v", updatedTask["status"])
+	}
+	if updatedTask["stdout"] != "bridge result" {
+		t.Fatalf("expected bridge stdout to be saved, got %v", updatedTask["stdout"])
 	}
 }
 
@@ -1715,6 +1817,7 @@ func TestServerTimesOutCodexTask(t *testing.T) {
 		TaskTimeout: 10 * time.Millisecond,
 	})
 	task := createTestTask(t, server, t.TempDir())
+	createApprovedTaskPlan(t, server, task["id"].(string))
 
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/tasks/"+task["id"].(string)+"/run", nil)
@@ -1810,6 +1913,7 @@ func TestServerDoesNotMarkCodexFailureCanceledWhenRequestContextCanceled(t *test
 	runner := &cancelingFailedAgentRunner{cancel: cancelRequest}
 	server := newTestServerWithOptions(t, gateway.Options{AgentRunner: runner})
 	task := createTestTask(t, server, t.TempDir())
+	createApprovedTaskPlan(t, server, task["id"].(string))
 
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/tasks/"+task["id"].(string)+"/run", nil).WithContext(requestCtx)
@@ -1859,6 +1963,8 @@ func TestServerRejectsConcurrentCodexRunsForSameProject(t *testing.T) {
 	project := createTestProject(t, server, projectPath)
 	firstTask := createTaskForProject(t, server, project["id"].(string))
 	secondTask := createTaskForProject(t, server, project["id"].(string))
+	createApprovedTaskPlan(t, server, firstTask["id"].(string))
+	createApprovedTaskPlan(t, server, secondTask["id"].(string))
 
 	firstResponse := httptest.NewRecorder()
 	firstRequest := httptest.NewRequest(http.MethodPost, "/api/tasks/"+firstTask["id"].(string)+"/run", nil)
@@ -1913,6 +2019,7 @@ func TestServerCancelsRunningCodexTask(t *testing.T) {
 	runner := newBlockingAgentRunner()
 	server := newTestServerWithOptions(t, gateway.Options{AgentRunner: runner})
 	task := createTestTask(t, server, t.TempDir())
+	createApprovedTaskPlan(t, server, task["id"].(string))
 
 	runResponse := httptest.NewRecorder()
 	runRequest := httptest.NewRequest(http.MethodPost, "/api/tasks/"+task["id"].(string)+"/run", nil)
@@ -2291,6 +2398,31 @@ func createTaskForProject(t *testing.T, server http.Handler, projectID string) m
 		t.Fatalf("decode task: %v", err)
 	}
 	return task
+}
+
+func createApprovedTaskPlan(t *testing.T, server http.Handler, taskID string) map[string]any {
+	t.Helper()
+
+	approvalResponse := doJSON(t, server, http.MethodPost, "/api/tasks/"+taskID+"/approvals", map[string]string{
+		"actionType":  "task_plan",
+		"description": "Approve execution plan for task",
+		"payloadJson": `{"plan":"approved test plan"}`,
+	})
+	if approvalResponse.Code != http.StatusCreated {
+		t.Fatalf("expected approval status 201, got %d: %s", approvalResponse.Code, approvalResponse.Body.String())
+	}
+	var approval map[string]any
+	if err := json.NewDecoder(approvalResponse.Body).Decode(&approval); err != nil {
+		t.Fatalf("decode approval: %v", err)
+	}
+
+	approveResponse := httptest.NewRecorder()
+	approveRequest := httptest.NewRequest(http.MethodPost, "/api/approvals/"+approval["id"].(string)+"/approve", nil)
+	server.ServeHTTP(approveResponse, approveRequest)
+	if approveResponse.Code != http.StatusOK {
+		t.Fatalf("expected approve status 200, got %d: %s", approveResponse.Code, approveResponse.Body.String())
+	}
+	return approval
 }
 
 func openTaskEventStreamAfterExistingEvents(t *testing.T, server *httptest.Server, taskID string) (<-chan string, func()) {
